@@ -5,8 +5,9 @@ This script looks for files in the `layer_outputs/` directory with names like
 `mlp_test_layer_outputs_step{step}_depth{depth}_width{width}_scale{scale}.npz` and
 extracts the saved `intrinsic_dims` array from each file.
 
-Produces a single plot with one curve per layer and saves it as a PNG in
-`layer_outputs/`.
+Produces two plots:
+  1. Intrinsic dimensionality per layer over training steps (saved to layer_outputs/)
+  2. Train/test accuracies over training steps (saved to figures/)
 """
 import re
 import sys
@@ -16,6 +17,7 @@ import matplotlib.pyplot as plt
 import argparse
 
 _FN_RE = re.compile(r"step(?P<step>\d+).*(depth(?P<depth>\d+))?.*(width(?P<width>\d+))?", re.IGNORECASE)
+_DATA_FN_RE = re.compile(r"training_data_(depth(?P<depth>\d+))?(.*width(?P<width>\d+))?(.*scale(?P<scale>[\d.]+))?", re.IGNORECASE)
 
 
 def main(layer_dir: Path, out_png: Path):
@@ -83,6 +85,8 @@ def main(layer_dir: Path, out_png: Path):
         plt.plot(xs, ys, marker='o', label=f'layer {layer_idx}', color=cmap(layer_idx % 20))
 
     plt.xlabel('Training Step')
+    plt.xscale('log')
+
     plt.ylabel('Intrinsic Dimensionality (TwoNN)')
     title_parts = []
     if depth is not None:
@@ -104,9 +108,104 @@ def main(layer_dir: Path, out_png: Path):
     return 0
 
 
+def plot_training_accuracies(fig_dir: Path, out_png: Path):
+    """Load training data from figures/ and plot train/test accuracies.
+    
+    Looks for files like training_data_depth{depth}_width{width}_scale{scale}.npz
+    and plots train/test accuracies over training steps.
+    """
+    files = list(fig_dir.glob('training_data_*.npz'))
+    if not files:
+        print(f"No training data files found in {fig_dir} matching pattern 'training_data_*.npz'", file=sys.stderr)
+        return 2
+    
+    # use the first (or only) training data file found
+    data_file = files[0]
+    print(f"Loading training data from {data_file.name}")
+    
+    data = np.load(data_file)
+    try:
+        log_steps = np.array(data['log_steps'], dtype=np.float64)
+        train_accuracies = np.array(data['train_accuracies'], dtype=np.float64)
+        test_accuracies = np.array(data['test_accuracies'], dtype=np.float64)        
+        
+        norms = np.array(data['norms'], dtype=np.float64)
+        
+        train_accuracies = train_accuracies[ log_steps >= 1000 ]
+        test_accuracies = test_accuracies[ log_steps >= 1000 ]        
+        norms = norms[ log_steps >= 1000 ]
+        
+        log_steps = log_steps[ log_steps >= 1000 ]
+
+    except KeyError as e:
+        print(f"Error: missing expected key in training data file: {e}", file=sys.stderr)
+        return 3
+    
+    # extract parameters from filename
+    m = _DATA_FN_RE.search(data_file.name)
+    depth = int(m.group('depth')) if m and m.group('depth') else None
+    width = int(m.group('width')) if m and m.group('width') else None
+    scale = float(m.group('scale')[:-1]) if m and m.group('scale') else None
+    
+    # prepare plot with dual y-axis
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+    
+    color_train = 'tab:red'
+    color_test = 'tab:green'
+    
+    ax1.set_xlabel('Training Step')
+    ax1.set_xscale('log')
+    ax1.set_ylabel('Accuracy', color='black')
+    ax1.plot(log_steps, train_accuracies, color=color_train, label='Train Accuracy', marker='o', markersize=4)
+    ax1.plot(log_steps, test_accuracies, color=color_test, label='Test Accuracy', marker='s', markersize=4)
+    ax1.tick_params(axis='y', labelcolor='black')
+    ax1.grid(True, linestyle='--', alpha=0.3)
+    
+    # add weight norm on secondary y-axis
+    ax2 = ax1.twinx()
+    color_norm = 'tab:purple'
+    ax2.set_ylabel('Weight Norm', color=color_norm)
+    ax2.plot(log_steps, norms, color=color_norm, label='Weight Norm', marker='^', markersize=4, linestyle='--')
+    ax2.tick_params(axis='y', labelcolor=color_norm)
+    
+    # combine legends
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='best', fontsize='small')
+    
+    # title
+    title_parts = []
+    if depth is not None:
+        title_parts.append(f'depth={depth}')
+    if width is not None:
+        title_parts.append(f'width={width}')
+    if scale is not None:
+        title_parts.append(f'scale={scale}')
+    title = 'Train/Test Accuracy over Training Steps'
+    if title_parts:
+        title += ' (' + ', '.join(title_parts) + ')'
+    ax1.set_title(title)
+    
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=200)
+    plt.close(fig)
+    print(f"Saved training accuracy plot to {out_png}")
+    return 0
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Plot intrinsic dimensionality per layer over training steps')
     parser.add_argument('--layer-dir', type=Path, default=Path('layer_outputs'), help='Directory containing saved .npz files')
-    parser.add_argument('--out', type=Path, default=Path('layer_outputs/intrinsic_dims_over_steps.png'), help='Output PNG path')
+    parser.add_argument('--out', type=Path, default=Path('layer_outputs/intrinsic_dims_over_steps.png'), help='Output PNG path for intrinsic dims plot')
+    parser.add_argument('--fig-dir', type=Path, default=Path('figures'), help='Directory containing training data .npz files')
+    parser.add_argument('--out-acc', type=Path, default=Path('figures/train_test_accuracy_over_steps.png'), help='Output PNG path for accuracy plot')
     args = parser.parse_args()
-    sys.exit(main(args.layer_dir, args.out))
+    
+    # plot intrinsic dims
+    ret1 = main(args.layer_dir, args.out)
+    
+    # plot training accuracies
+    ret2 = plot_training_accuracies(args.fig_dir, args.out_acc)
+    
+    sys.exit(ret1 or ret2)

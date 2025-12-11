@@ -106,7 +106,7 @@ def compute_layer_outputs(model, dataset, device, N=2000, batch_size=50):
 
     return outputs_per_layer, all_labels
 
-def compute_intrinsic_dims(layer_outputs, sample_limit=2000):
+def compute_intrinsic_dims(layer_outputs, sample_limit=10000):
     """Compute intrinsic dimensionality for each layer output using skdim's TwoNN.
 
     Returns a NumPy array of shape (num_layers,) with the estimated intrinsic dimension
@@ -297,6 +297,24 @@ with tqdm(total=optimization_steps) as pbar:
                     np.savez_compressed(save_path, **save_dict)
                     # small, non-fatal message printed to stdout so user sees the save event
                     print(f"[Saved layer outputs] step={steps} -> {save_path}")
+                    # Save a training checkpoint (model + optimizer + metadata)
+                    try:
+                        checkpoint_dir = Path("checkpoints")
+                        checkpoint_dir.mkdir(exist_ok=True)
+                        ckpt_path = checkpoint_dir / f"mlp_checkpoint_step{steps}_depth{depth}_width{width}_scale{initialization_scale}.pt"
+                        torch.save({
+                            'step': steps,
+                            'model_state_dict': mlp.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'train_losses': train_losses,
+                            'test_losses': test_losses,
+                            'train_accuracies': train_accuracies,
+                            'test_accuracies': test_accuracies,
+                            'log_steps': log_steps,
+                        }, ckpt_path)
+                        print(f"[Saved checkpoint] step={steps} -> {ckpt_path}")
+                    except Exception as e_ckpt:
+                        print(f"Warning: failed saving checkpoint at step {steps}: {e_ckpt}")
             except Exception as e:
                 # avoid training interruption if something goes wrong (I/O, device mismatch, etc.)
                 print(f"Warning: failed saving layer outputs at step {steps}: {e}")
