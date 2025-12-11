@@ -76,6 +76,7 @@ loss_function_dict = {
 
 train_points = 1000
 optimization_steps = 100000
+optimization_steps = 1000
 batch_size = 200
 loss_function = 'MSE'   # 'MSE' or 'CrossEntropy'
 optimizer = 'AdamW'     # 'AdamW' or 'Adam' or 'SGD'
