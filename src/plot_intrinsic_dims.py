@@ -125,17 +125,23 @@ def plot_training_accuracies(fig_dir: Path, out_png: Path):
     
     data = np.load(data_file)
     try:
-        log_steps = np.array(data['log_steps'], dtype=np.float64)
+        log_steps = np.array(data['train_log_steps'], dtype=np.float64)
+        test_log_steps = np.array(data['test_log_steps'], dtype=np.float64)
+        
         train_accuracies = np.array(data['train_accuracies'], dtype=np.float64)
         test_accuracies = np.array(data['test_accuracies'], dtype=np.float64)        
-        
+        adv_test_accuracies = np.array(data['adv_test_accuracies'], dtype=np.float64) if 'adv_test_accuracies' in data else None
         norms = np.array(data['norms'], dtype=np.float64)
         
         train_accuracies = train_accuracies[ log_steps >= 1000 ]
-        test_accuracies = test_accuracies[ log_steps >= 1000 ]        
+        test_accuracies = test_accuracies[ test_log_steps >= 1000 ]
+        if adv_test_accuracies is not None:
+            adv_test_accuracies = adv_test_accuracies[ test_log_steps >= 1000 ]
+                
         norms = norms[ log_steps >= 1000 ]
         
         log_steps = log_steps[ log_steps >= 1000 ]
+        test_log_steps = test_log_steps[ test_log_steps >= 1000 ]
 
     except KeyError as e:
         print(f"Error: missing expected key in training data file: {e}", file=sys.stderr)
@@ -157,7 +163,8 @@ def plot_training_accuracies(fig_dir: Path, out_png: Path):
     ax1.set_xscale('log')
     ax1.set_ylabel('Accuracy', color='black')
     ax1.plot(log_steps, train_accuracies, color=color_train, label='Train Accuracy', marker='o', markersize=4)
-    ax1.plot(log_steps, test_accuracies, color=color_test, label='Test Accuracy', marker='s', markersize=4)
+    ax1.plot(test_log_steps, test_accuracies, color=color_test, label='Test Accuracy', marker='s', markersize=4)
+    ax1.plot(test_log_steps, adv_test_accuracies, color='tab:orange', label='Adv Test Accuracy', marker='x', markersize=4) if adv_test_accuracies is not None else None
     ax1.tick_params(axis='y', labelcolor='black')
     ax1.grid(True, linestyle='--', alpha=0.3)
     

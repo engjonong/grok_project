@@ -228,8 +228,8 @@ loss_function_dict = {
 
 
 train_points = 1000
-optimization_steps = 200000
-#optimization_steps = 10000 # for quick test to check code
+optimization_steps = 180000
+#optimization_steps = 5000 # for quick test to check code
 batch_size = 200
 loss_function = 'MSE'   # 'MSE' or 'CrossEntropy'
 optimizer = 'AdamW'     # 'AdamW' or 'Adam' or 'SGD'
@@ -332,6 +332,11 @@ with tqdm(total=optimization_steps) as pbar:
 
         # collect per-layer outputs every 100 steps and save
         if steps % 1000 == 0 and steps > 0:
+            # Regenerate adversarial examples from the test dataset
+            if steps == 20000:
+                adv_examples, adv_labels = generate_fgsm_adversarial_examples(mlp, test, epsilon=0.1, device=device)
+                adv_test = torch.utils.data.TensorDataset(adv_examples, adv_labels)
+
             try:
                 # obtain the layer outputs on clean test data
                 layer_outputs, test_labels_for_save = compute_layer_outputs(mlp, test, device, batch_size=batch_size)
@@ -450,9 +455,11 @@ if layer_outputs:
     try:
         np.savez_compressed(
             data_path,
+            train_log_steps=np.asarray(train_log_steps, dtype=np.float64),
             test_log_steps=np.asarray(test_log_steps, dtype=np.float64),
             train_accuracies=np.asarray(train_accuracies, dtype=np.float64),
             test_accuracies=np.asarray(test_accuracies, dtype=np.float64),
+            adv_test_accuracies=np.asarray(adv_test_accuracies, dtype=np.float64),
             norms=np.asarray(norms, dtype=np.float64),
         )
         print(f"Saved training data to: {data_path}")
