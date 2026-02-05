@@ -3,11 +3,12 @@
 
 This script looks for files in the `layer_outputs/` directory with names like
 `mlp_test_layer_outputs_step{step}_depth{depth}_width{width}_scale{scale}.npz` and
-extracts the saved `intrinsic_dims` array from each file.
+extracts the saved `intrinsic_dims` (TwoNN) and `l2n2_intrinsic_dims` (L2N2) arrays from each file.
 
-Produces two plots:
-  1. Intrinsic dimensionality per layer over training steps (saved to layer_outputs/)
-  2. Train/test accuracies over training steps (saved to figures/)
+Produces three plots:
+  1. TwoNN intrinsic dimensionality per layer over training steps (saved to layer_outputs/)
+  2. L2N2 intrinsic dimensionality per layer over training steps (saved to layer_outputs/)
+  3. Train/test accuracies over training steps (saved to figures/)
 """
 import re
 import sys
@@ -34,7 +35,8 @@ def main(layer_dir: Path, out_png: Path):
         return 2
 
     # map layer_idx -> list of (step, dim)
-    per_layer_data = {}
+    per_layer_data_twonn = {}
+    per_layer_data_l2n2 = {}
     depth = None
     width = None
 
@@ -55,56 +57,71 @@ def main(layer_dir: Path, out_png: Path):
 
         data = np.load(f)
         try:
-            print(data['intrinsic_dims'])
-            dims = np.array(data['intrinsic_dims']).astype(np.float64)
+            print("TwoNN:", data['intrinsic_dims'])
+            dims_twonn = np.array(data['intrinsic_dims']).astype(np.float64)
 
             # store
-            for idx, d in enumerate(dims):
-                per_layer_data.setdefault(idx, []).append((step, float(d)))
+            for idx, d in enumerate(dims_twonn):
+                per_layer_data_twonn.setdefault(idx, []).append((step, float(d)))
         except:
-            print(f"  No 'intrinsic_dims' array found in {f}; skipping.", file=sys.stderr)
+            print(f"  No 'intrinsic_dims' array found in {f}; skipping TwoNN.", file=sys.stderr)
 
-    if not per_layer_data:
+        try:
+            print("L2N2:", data['l2n2_intrinsic_dims'])
+            dims_l2n2 = np.array(data['l2n2_intrinsic_dims']).astype(np.float64)
+
+            # store
+            for idx, d in enumerate(dims_l2n2):
+                per_layer_data_l2n2.setdefault(idx, []).append((step, float(d)))
+        except:
+            print(f"  No 'l2n2_intrinsic_dims' array found in {f}; skipping L2N2.", file=sys.stderr)
+
+    if not per_layer_data_twonn and not per_layer_data_l2n2:
         print("No intrinsic-dim data collected; nothing to plot.", file=sys.stderr)
         return 3
 
-    # prepare plot
-    plt.figure(figsize=(10, 6))
-    cmap = plt.get_cmap('tab20')
-    max_layers = max(per_layer_data.keys()) + 1
+    def plot_intrinsic_dims(per_layer_data, method_name, depth, width, out_png):
+        if not per_layer_data:
+            return
+        plt.figure(figsize=(10, 6))
+        cmap = plt.get_cmap('tab20')
+        for layer_idx, values in sorted(per_layer_data.items()):
+            values_sorted = sorted(values, key=lambda x: x[0])
+            xs = [v[0] for v in values_sorted]
+            ys = [v[1] for v in values_sorted]
+            # convert step=1e9 (final file) to max step + small offset so it appears to the right
+            xs = np.array(xs, dtype=np.float64)
+            if np.any(xs >= 1e9):
+                finite_max = np.max(xs[xs < 1e9]) if np.any(xs < 1e9) else 0
+                xs = np.where(xs >= 1e9, finite_max * 1.02 + 1.0, xs)
+            plt.plot(xs, ys, marker='o', label=f'layer {layer_idx}', color=cmap(layer_idx % 20))
 
-    for layer_idx, values in sorted(per_layer_data.items()):
-        values_sorted = sorted(values, key=lambda x: x[0])
-        xs = [v[0] for v in values_sorted]
-        ys = [v[1] for v in values_sorted]
-        # convert step=1e9 (final file) to max step + small offset so it appears to the right
-        xs = np.array(xs, dtype=np.float64)
-        if np.any(xs >= 1e9):
-            finite_max = np.max(xs[xs < 1e9]) if np.any(xs < 1e9) else 0
-            xs = np.where(xs >= 1e9, finite_max * 1.02 + 1.0, xs)
-        plt.plot(xs, ys, marker='o', label=f'layer {layer_idx}', color=cmap(layer_idx % 20))
+        plt.xlabel('Training Step')
+        plt.xscale('log')
 
-    plt.xlabel('Training Step')
-    plt.xscale('log')
+        plt.ylabel(f'Intrinsic Dimensionality ({method_name})')
+        title_parts = []
+        if depth is not None:
+            title_parts.append(f'depth={depth}')
+        if width is not None:
+            title_parts.append(f'width={width}')
+        title = f'Intrinsic Dimensionality over Training Steps ({method_name})'
+        if title_parts:
+            title += ' (' + ', '.join(title_parts) + ')'
+        plt.title(title)
+        plt.legend(loc='best', fontsize='small')
+        plt.grid(True, linestyle='--', alpha=0.3)
 
-    plt.ylabel('Intrinsic Dimensionality (TwoNN)')
-    title_parts = []
-    if depth is not None:
-        title_parts.append(f'depth={depth}')
-    if width is not None:
-        title_parts.append(f'width={width}')
-    title = 'Intrinsic Dimensionality over Training Steps'
-    if title_parts:
-        title += ' (' + ', '.join(title_parts) + ')'
-    plt.title(title)
-    plt.legend(loc='best', fontsize='small')
-    plt.grid(True, linestyle='--', alpha=0.3)
+        out_png.parent.mkdir(parents=True, exist_ok=True)
+        plt.tight_layout()
+        plt.savefig(out_png, dpi=200)
+        plt.close()
+        print(f"Saved {method_name} intrinsic-dim plot to {out_png}")
 
-    out_png.parent.mkdir(parents=True, exist_ok=True)
-    plt.tight_layout()
-    plt.savefig(out_png, dpi=200)
-    plt.close()
-    print(f"Saved intrinsic-dim plot to {out_png}")
+    twonn_out = out_png.parent / (out_png.stem + '_twonn' + out_png.suffix)
+    l2n2_out = out_png.parent / (out_png.stem + '_l2n2' + out_png.suffix)
+    plot_intrinsic_dims(per_layer_data_twonn, 'TwoNN', depth, width, twonn_out)
+    plot_intrinsic_dims(per_layer_data_l2n2, 'L2N2', depth, width, l2n2_out)
     return 0
 
 
@@ -202,7 +219,7 @@ def plot_training_accuracies(fig_dir: Path, out_png: Path):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Plot intrinsic dimensionality per layer over training steps')
+    parser = argparse.ArgumentParser(description='Plot intrinsic dimensionality per layer over training steps (TwoNN and L2N2)')
     parser.add_argument('--layer-dir', type=Path, default=Path('layer_outputs'), help='Directory containing saved .npz files')
     parser.add_argument('--out', type=Path, default=Path('layer_outputs/intrinsic_dims_over_steps.png'), help='Output PNG path for intrinsic dims plot')
     parser.add_argument('--fig-dir', type=Path, default=Path('figures'), help='Directory containing training data .npz files')
