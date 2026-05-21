@@ -251,6 +251,33 @@ def generate_fgsm_adversarial_examples(model, dataset, epsilon, device, batch_si
     
     return adv_examples, labels
 
+import torch.nn.functional as F
+
+class Net(nn.Module):
+    def __init__(self):
+        super(Net, self).__init__()
+        self.conv1 = nn.Conv2d(1, 32, 3, 1)
+        self.conv2 = nn.Conv2d(32, 64, 3, 1)
+        #self.dropout1 = nn.Dropout(0.25)
+        #self.dropout2 = nn.Dropout(0.5)
+        self.fc1 = nn.Linear(9216, 128)
+        self.fc2 = nn.Linear(128, 10)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = F.relu(x)
+        x = self.conv2(x)
+        x = F.relu(x)
+        x = F.max_pool2d(x, 2)
+        #x = self.dropout1(x)
+        x = torch.flatten(x, 1)
+        x = self.fc1(x)
+        x = F.relu(x)
+        #x = self.dropout2(x)
+        x = self.fc2(x)
+        output = x
+        #output = F.log_softmax(x, dim=1)
+        return output
 
 optimizer_dict = {
     'AdamW': torch.optim.AdamW,
@@ -271,18 +298,17 @@ loss_function_dict = {
 }
 
 
-train_points = 1000
+train_points = 1024
 optimization_steps = 180000
-#optimization_steps = 5000 # for quick test to check code
-batch_size = 200
-loss_function = 'MSE'   # 'MSE' or 'CrossEntropy'
-#loss_function = 'CrossEntropy'   # 'MSE' or 'CrossEntropy'
-optimizer = 'AdamW'     # 'AdamW' or 'Adam' or 'SGD'
+optimization_steps = 8000 # for quick test to check code
+batch_size = 256
+loss_function = 'CrossEntropy'   # 'MSE' or 'CrossEntropy'
 optimizer = 'SGD'     # 'AdamW' or 'Adam' or 'SGD'
 weight_decay = 0.01
 lr = 1e-3
 initialization_scale = 8.0
-#initialization_scale = 1.0   # the standard deviation of the normal distribution used for weight initialization; higher means more unconstrained optimization, lower means more constrained
+initialization_scale = 1.0
+#initialization_scale = 0.5
 download_directory = "."
 
 depth = 3               # the number of nn.Linear modules in the model
@@ -293,6 +319,7 @@ log_freq = math.ceil(optimization_steps / 150)
 
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
 dtype = torch.float64
 seed = 0
 
@@ -316,17 +343,18 @@ assert activation in activation_dict, f"Unsupported activation function: {activa
 activation_fn = activation_dict[activation]
 
 # create model
-layers = [nn.Flatten()]
-for i in range(depth):
-    if i == 0:
-        layers.append(nn.Linear(784, width))
-        layers.append(activation_fn())
-    elif i == depth - 1:
-        layers.append(nn.Linear(width, 10))
-    else:
-        layers.append(nn.Linear(width, width))
-        layers.append(activation_fn())
-mlp = nn.Sequential(*layers).to(device)
+# 2 convolutional layers -> global pooling -> output layer
+mlp = nn.Sequential(
+    nn.Conv2d(1, 32, kernel_size=3, padding=1),
+    activation_fn(),
+    nn.Conv2d(32, 64, kernel_size=3, padding=1),
+    activation_fn(),
+    nn.AdaptiveAvgPool2d((1, 1)),
+    nn.Flatten(),
+    nn.Linear(64, 10)
+).to(device)
+
+mlp = Net().to(device)
 with torch.no_grad():
     for p in mlp.parameters():
         p.data = initialization_scale * p.data
@@ -337,7 +365,6 @@ adv_test = torch.utils.data.TensorDataset(adv_examples, adv_labels)
 
 # create optimizer
 assert optimizer in optimizer_dict, f"Unsupported optimizer choice: {optimizer}"
-#weight_decay = 0 # override to 0 for now
 optimizer = optimizer_dict[optimizer](mlp.parameters(), lr=lr, weight_decay=weight_decay)
 
 # define loss function
@@ -372,34 +399,34 @@ with tqdm(total=optimization_steps) as pbar:
             with torch.no_grad():
                 total = sum(torch.pow(p, 2).sum() for p in mlp.parameters())
                 norms.append(float(np.sqrt(total.item())))
-                last_layer = sum(torch.pow(p, 2).sum() for p in mlp[-1].parameters())
+                # Support both nn.Sequential (subscriptable) and custom nn.Module
+                children = list(mlp.children())
+                if len(children) > 0:
+                    last_mod = children[-1]
+                else:
+                    last_mod = mlp
+                last_layer = sum(torch.pow(p, 2).sum() for p in last_mod.parameters())
                 last_layer_norms.append(float(np.sqrt(last_layer.item())))
             pbar.set_description("L: {0:1.1e}. A: {1:2.1f}%".format(
                 train_losses[-1],
                 train_accuracies[-1] * 100))
 
         # collect per-layer outputs every 100 steps and save
-        save_flag = 0
-        if (steps < 1000) & (steps % 100 == 0):
-            save_flag = 1
-        elif (steps > 1000) & (steps % 5000 == 0):
-            save_flag = 1
-
-        #if steps % 5000 == 0 and steps > 0:
-        if save_flag:
+        if steps % 40 == 0 and steps > 0:
             # Regenerate adversarial examples from the test dataset
-            if steps == 20000:
+            if 1:#steps == 1200:#20000:
+                print("Regenerating adversarial examples at step", steps)
                 adv_examples, adv_labels = generate_fgsm_adversarial_examples(mlp, test, epsilon=0.1, device=device)
                 adv_test = torch.utils.data.TensorDataset(adv_examples, adv_labels)
 
             try:
                 # obtain the layer outputs on clean test data
-                layer_outputs, test_labels_for_save = compute_layer_outputs(mlp, test, device, batch_size=batch_size)
+                #layer_outputs, test_labels_for_save = compute_layer_outputs(mlp, test, device, batch_size=batch_size)
                 test_losses.append(compute_loss(mlp, test, loss_function, device, N=len(test)))
                 test_accuracies.append(compute_accuracy(mlp, test, device, N=len(test)))
                 
                 # obtain the layer outputs on adversarial test data (FGSM, epsilon=0.1)
-                adv_layer_outputs, adv_test_labels_for_save = compute_layer_outputs(mlp, adv_test, device, batch_size=batch_size)
+                #adv_layer_outputs, adv_test_labels_for_save = compute_layer_outputs(mlp, adv_test, device, batch_size=batch_size)
                 adv_test_accuracies.append(compute_accuracy(mlp, adv_test, device, N=len(adv_test)))
                 adv_test_losses.append(compute_loss(mlp, adv_test, loss_function, device, N=len(adv_test)))
 
@@ -409,16 +436,17 @@ with tqdm(total=optimization_steps) as pbar:
                 l2n2_intrinsic_dims = None
                 adv_intrinsic_dims = None
                 adv_l2n2_intrinsic_dims = None
+                print(layer_outputs.shape)
                 if layer_outputs or adv_layer_outputs:
                     # compute intrinsic dims using TwoNN (if available)
                     try:
-                        intrinsic_dims = compute_intrinsic_dims(layer_outputs, sample_limit=10000)
+                        intrinsic_dims = compute_intrinsic_dims(layer_outputs, sample_limit=2000)
                     except ImportError as ie:
                         intrinsic_dims = None
                         print(f"Warning: TwoNN not available, skipping intrinsic dim computation: {ie}")
                     
                     # compute intrinsic dims using l2n2
-                    l2n2_intrinsic_dims = compute_l2n2_intrinsic_dims(layer_outputs, sample_limit=10000)
+                    l2n2_intrinsic_dims = compute_l2n2_intrinsic_dims(layer_outputs, sample_limit=2000)
 
                     print(f"Step {steps} - TwoNN intrinsic dims: {intrinsic_dims}")
                     print(f"Step {steps} - L2N2 intrinsic dims: {l2n2_intrinsic_dims}")
@@ -426,13 +454,13 @@ with tqdm(total=optimization_steps) as pbar:
                 if adv_layer_outputs:
                     # compute intrinsic dims for adv using TwoNN (if available)
                     try:
-                        adv_intrinsic_dims = compute_intrinsic_dims(adv_layer_outputs, sample_limit=1000)
+                        adv_intrinsic_dims = compute_intrinsic_dims(adv_layer_outputs, sample_limit=10000)
                     except ImportError as ie:
                         adv_intrinsic_dims = None
                         print(f"Warning: TwoNN not available, skipping adv intrinsic dim computation: {ie}")
                     
                     # compute intrinsic dims for adv using l2n2
-                    adv_l2n2_intrinsic_dims = compute_l2n2_intrinsic_dims(adv_layer_outputs, sample_limit=1000)
+                    adv_l2n2_intrinsic_dims = compute_l2n2_intrinsic_dims(adv_layer_outputs, sample_limit=10000)
 
                     print(f"Step {steps} - Adv TwoNN intrinsic dims: {adv_intrinsic_dims}")
                     print(f"Step {steps} - Adv L2N2 intrinsic dims: {adv_l2n2_intrinsic_dims}")
@@ -513,7 +541,8 @@ print("Plotting")
 
 # compute and save per-layer outputs for test data
 print("Collecting layer outputs for test data")
-layer_outputs, test_labels = compute_layer_outputs(mlp, test, device, batch_size=batch_size)
+#layer_outputs, test_labels = compute_layer_outputs(mlp, test, device, batch_size=batch_size)
+layer_outputs = False
 if layer_outputs:
     out_dir = Path("layer_outputs")
     out_dir.mkdir(exist_ok=True)

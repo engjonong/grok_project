@@ -3,7 +3,8 @@
 
 This script looks for files in the `layer_outputs/` directory with names like
 `mlp_test_layer_outputs_step{step}_depth{depth}_width{width}_scale{scale}.npz` and
-extracts the saved `intrinsic_dims` (TwoNN) and `l2n2_intrinsic_dims` (L2N2) arrays from each file.
+extracts the saved `intrinsic_dims` (TwoNN), `l2n2_intrinsic_dims` (L2N2),
+`adv_intrinsic_dims`, and `adv_l2n2_intrinsic_dims` arrays from each file.
 
 Produces three plots:
   1. TwoNN intrinsic dimensionality per layer over training steps (saved to layer_outputs/)
@@ -21,7 +22,7 @@ _FN_RE = re.compile(r"step(?P<step>\d+).*(depth(?P<depth>\d+))?.*(width(?P<width
 _DATA_FN_RE = re.compile(r"training_data_(depth(?P<depth>\d+))?(.*width(?P<width>\d+))?(.*scale(?P<scale>[\d.]+))?", re.IGNORECASE)
 
 
-def main(layer_dir: Path, out_png: Path):
+def main(layer_dir: Path, out_png: Path, fig_dir: Path = Path('figures')):
     files = list(layer_dir.glob('mlp_test_layer_outputs_step*.npz'))
     # sort files by numeric step extracted from filename (place files without a step at the end)
     def _extract_step(fpath: Path):
@@ -37,6 +38,9 @@ def main(layer_dir: Path, out_png: Path):
     # map layer_idx -> list of (step, dim)
     per_layer_data_twonn = {}
     per_layer_data_l2n2 = {}
+    per_layer_data_adv_twonn = {}
+    per_layer_data_adv_l2n2 = {}
+    adv_test_acc_over_time = {}
     depth = None
     width = None
 
@@ -67,6 +71,16 @@ def main(layer_dir: Path, out_png: Path):
             print(f"  No 'intrinsic_dims' array found in {f}; skipping TwoNN.", file=sys.stderr)
 
         try:
+            print("Adv TwoNN:", data['adv_intrinsic_dims'])
+            dims_adv_twonn = np.array(data['adv_intrinsic_dims']).astype(np.float64)
+
+            # store
+            for idx, d in enumerate(dims_adv_twonn):
+                per_layer_data_adv_twonn.setdefault(idx, []).append((step, float(d)))
+        except:
+            print(f"  No 'adv_intrinsic_dims' array found in {f}; skipping Adv TwoNN.", file=sys.stderr)
+
+        try:
             print("L2N2:", data['l2n2_intrinsic_dims'])
             dims_l2n2 = np.array(data['l2n2_intrinsic_dims']).astype(np.float64)
 
@@ -76,30 +90,92 @@ def main(layer_dir: Path, out_png: Path):
         except:
             print(f"  No 'l2n2_intrinsic_dims' array found in {f}; skipping L2N2.", file=sys.stderr)
 
+        try:
+            print("Adv L2N2:", data['adv_l2n2_intrinsic_dims'])
+            dims_adv_l2n2 = np.array(data['adv_l2n2_intrinsic_dims']).astype(np.float64)
+
+            # store
+            for idx, d in enumerate(dims_adv_l2n2):
+                per_layer_data_adv_l2n2.setdefault(idx, []).append((step, float(d)))
+        except:
+            print(f"  No 'adv_l2n2_intrinsic_dims' array found in {f}; skipping Adv L2N2.", file=sys.stderr)
+
+        if 'adv_test_accuracies' in data:
+            try:
+                adv_acc = np.array(data['adv_test_accuracies'], dtype=np.float64)
+                if adv_acc.size == 1:
+                    adv_test_acc_over_time[step] = float(adv_acc)
+                elif 'test_log_steps' in data:
+                    test_steps = np.array(data['test_log_steps'], dtype=np.float64)
+                    match = np.where(test_steps == step)[0]
+                    if match.size > 0:
+                        adv_test_acc_over_time[step] = float(adv_acc[match[0]])
+                    else:
+                        adv_test_acc_over_time[step] = float(adv_acc[-1])
+                else:
+                    adv_test_acc_over_time[step] = float(adv_acc[-1])
+            except Exception as e:
+                print(f"  Failed to read adv_test_accuracies from {f}: {e}", file=sys.stderr)
+
     if not per_layer_data_twonn and not per_layer_data_l2n2:
         print("No intrinsic-dim data collected; nothing to plot.", file=sys.stderr)
         return 3
 
-    def plot_intrinsic_dims(per_layer_data, method_name, depth, width, out_png):
-        if not per_layer_data:
+    def plot_intrinsic_dims(per_layer_data_test, per_layer_data_adv, method_name, depth, width, out_png, adv_test_acc_over_time=None):
+        if not per_layer_data_test and not per_layer_data_adv:
             return
-        plt.figure(figsize=(10, 6))
+        fig, ax1 = plt.subplots(figsize=(10, 6))
         cmap = plt.get_cmap('tab20')
-        for layer_idx, values in sorted(per_layer_data.items()):
+        legend_handles = []
+        legend_labels = []
+
+        for layer_idx, values in sorted(per_layer_data_test.items()):
             values_sorted = sorted(values, key=lambda x: x[0])
             xs = [v[0] for v in values_sorted]
             ys = [v[1] for v in values_sorted]
-            # convert step=1e9 (final file) to max step + small offset so it appears to the right
             xs = np.array(xs, dtype=np.float64)
             if np.any(xs >= 1e9):
                 finite_max = np.max(xs[xs < 1e9]) if np.any(xs < 1e9) else 0
                 xs = np.where(xs >= 1e9, finite_max * 1.02 + 1.0, xs)
-            plt.plot(xs, ys, marker='o', label=f'layer {layer_idx}', color=cmap(layer_idx % 20))
+            line, = ax1.plot(xs, ys, marker='o', label=f'layer {layer_idx} (test)', color=cmap(layer_idx % 20))
+            legend_handles.append(line)
+            legend_labels.append(f'layer {layer_idx} (test)')
 
-        plt.xlabel('Training Step')
-        plt.xscale('log')
+        #for layer_idx, values in sorted(per_layer_data_adv.items()):
+        if 0: # skip plotting results for adversarial data for now since it's often very noisy and hard to interpret
+            values_sorted = sorted(values, key=lambda x: x[0])
+            xs = [v[0] for v in values_sorted]
+            ys = [v[1] for v in values_sorted]
+            xs = np.array(xs, dtype=np.float64)
+            if np.any(xs >= 1e9):
+                finite_max = np.max(xs[xs < 1e9]) if np.any(xs < 1e9) else 0
+                xs = np.where(xs >= 1e9, finite_max * 1.02 + 1.0, xs)
+            line, = ax1.plot(xs, ys, marker='x', linestyle='--', label=f'layer {layer_idx} (adv)', color=cmap(layer_idx % 20))
+            legend_handles.append(line)
+            legend_labels.append(f'layer {layer_idx} (adv)')
 
-        plt.ylabel(f'Intrinsic Dimensionality ({method_name})')
+        ax1.set_xlabel('Training Step')
+        ax1.set_xscale('log')
+        ax1.set_ylabel(f'Intrinsic Dimensionality ({method_name})')
+        ax1.grid(True, linestyle='--', alpha=0.3)
+
+        ax2 = None
+        if adv_test_acc_over_time:
+            x_steps = set()
+            for values in list(per_layer_data_test.values()) + list(per_layer_data_adv.values()):
+                x_steps.update(v[0] for v in values)
+            adv_steps = sorted(step for step in adv_test_acc_over_time.keys() if step in x_steps)
+            if adv_steps:
+                adv_values = [adv_test_acc_over_time[step] for step in adv_steps]
+                ax2 = ax1.twinx()
+                color_adv = 'tab:orange'
+                adv_line, = ax2.plot(adv_steps, adv_values, color=color_adv, marker='x', linestyle='-', linewidth=2, label='Adv Test Accuracy')
+                ax2.set_ylabel('Adv Test Accuracy', color=color_adv)
+                ax2.tick_params(axis='y', labelcolor=color_adv)
+                ax2.set_ylim(0.0, 1.0)
+                legend_handles.append(adv_line)
+                legend_labels.append('Adv Test Accuracy')
+
         title_parts = []
         if depth is not None:
             title_parts.append(f'depth={depth}')
@@ -108,20 +184,40 @@ def main(layer_dir: Path, out_png: Path):
         title = f'Intrinsic Dimensionality over Training Steps ({method_name})'
         if title_parts:
             title += ' (' + ', '.join(title_parts) + ')'
-        plt.title(title)
-        plt.legend(loc='best', fontsize='small')
-        plt.grid(True, linestyle='--', alpha=0.3)
+        ax1.set_title(title)
+
+        ax1.legend(legend_handles, legend_labels, loc='best', fontsize='small')
 
         out_png.parent.mkdir(parents=True, exist_ok=True)
-        plt.tight_layout()
-        plt.savefig(out_png, dpi=200)
-        plt.close()
+        fig.tight_layout()
+        fig.savefig(out_png, dpi=200)
+        plt.close(fig)
         print(f"Saved {method_name} intrinsic-dim plot to {out_png}")
+
+    def load_adv_test_acc_from_figures(fig_dir: Path):
+        out = {}
+        files = list(fig_dir.glob('training_data_*.npz'))
+        if not files:
+            return out
+        data = np.load(files[0])
+        if 'adv_test_accuracies' not in data or 'test_log_steps' not in data:
+            return out
+        steps = np.array(data['test_log_steps'], dtype=np.float64)
+        acc = np.array(data['adv_test_accuracies'], dtype=np.float64)
+        for step, value in zip(steps, acc):
+            key = int(step) if np.isfinite(step) and float(step).is_integer() else float(step)
+            out[key] = float(value)
+        return out
+
+    # try to read adv test accuracy from training data files if available
+    adv_test_accs_from_figures = load_adv_test_acc_from_figures(fig_dir)
+    if adv_test_accs_from_figures:
+        adv_test_acc_over_time = adv_test_accs_from_figures
 
     twonn_out = out_png.parent / (out_png.stem + '_twonn' + out_png.suffix)
     l2n2_out = out_png.parent / (out_png.stem + '_l2n2' + out_png.suffix)
-    plot_intrinsic_dims(per_layer_data_twonn, 'TwoNN', depth, width, twonn_out)
-    plot_intrinsic_dims(per_layer_data_l2n2, 'L2N2', depth, width, l2n2_out)
+    plot_intrinsic_dims(per_layer_data_twonn, per_layer_data_adv_twonn, 'TwoNN', depth, width, twonn_out, adv_test_acc_over_time=adv_test_acc_over_time)
+    plot_intrinsic_dims(per_layer_data_l2n2, per_layer_data_adv_l2n2, 'L2N2', depth, width, l2n2_out, adv_test_acc_over_time=adv_test_acc_over_time)
     return 0
 
 
@@ -150,15 +246,15 @@ def plot_training_accuracies(fig_dir: Path, out_png: Path):
         adv_test_accuracies = np.array(data['adv_test_accuracies'], dtype=np.float64) if 'adv_test_accuracies' in data else None
         norms = np.array(data['norms'], dtype=np.float64)
         
-        train_accuracies = train_accuracies[ log_steps >= 1000 ]
-        test_accuracies = test_accuracies[ test_log_steps >= 1000 ]
+        train_accuracies = train_accuracies[ log_steps >= 100 ]
+        test_accuracies = test_accuracies[ test_log_steps >= 100 ]
         if adv_test_accuracies is not None:
-            adv_test_accuracies = adv_test_accuracies[ test_log_steps >= 1000 ]
+            adv_test_accuracies = adv_test_accuracies[ test_log_steps >= 100 ]
                 
-        norms = norms[ log_steps >= 1000 ]
+        norms = norms[ log_steps >= 100 ]
         
-        log_steps = log_steps[ log_steps >= 1000 ]
-        test_log_steps = test_log_steps[ test_log_steps >= 1000 ]
+        log_steps = log_steps[ log_steps >= 100 ]
+        test_log_steps = test_log_steps[ test_log_steps >= 100 ]
 
     except KeyError as e:
         print(f"Error: missing expected key in training data file: {e}", file=sys.stderr)
@@ -226,8 +322,8 @@ if __name__ == '__main__':
     parser.add_argument('--out-acc', type=Path, default=Path('figures/train_test_accuracy_over_steps.png'), help='Output PNG path for accuracy plot')
     args = parser.parse_args()
     
-    # plot intrinsic dims
-    ret1 = main(args.layer_dir, args.out)
+    # plot intrinsic dims (and optionally include adv test accuracy from training data)
+    ret1 = main(args.layer_dir, args.out, args.fig_dir)
     
     # plot training accuracies
     ret2 = plot_training_accuracies(args.fig_dir, args.out_acc)

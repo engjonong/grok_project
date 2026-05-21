@@ -91,10 +91,8 @@ def generate_fgsm_adversarial_examples(model, dataset, epsilon, device, batch_si
 # Parameters matching the training script
 depth = 3
 width = 200
-#width=300
 activation = 'ReLU'
 initialization_scale = 8.0
-initialization_scale = 1.0   # the standard deviation of the normal distribution used for weight initialization; higher means more unconstrained optimization, lower means more constrained
 download_directory = "."
 
 # Toggle visualization of first 16 adversarial examples (4x4 grid)
@@ -160,203 +158,51 @@ def analyze_hyperplanes(model, dataset, device, batch_size=50):
     
     return counts_per_layer
 
-
-def extract_weight_bias_rows(model):
-    """Return a list of numpy arrays containing weight+bias rows of each linear layer.
-
-    Each array has shape (out_features, in_features + 1); the final column is the bias.
+# Function to analyze hyperplanes
+def ID_bottleneck_upperbound(model, dataset, device, batch_size=50):
     """
-    rows = []
-    for module in model.modules():
-        if isinstance(module, nn.Linear):
-            w = module.weight.detach().cpu().numpy()
-            b = module.bias.detach().cpu().numpy().reshape(-1, 1)
-            mat = np.concatenate([w, b], axis=1)
-            mat = w #just use weights for now
-            rows.append(mat)
-    return rows
-
-def extract_norm_weight_rows(model):
-    """Return a list of numpy arrays containing weight+bias rows of each linear layer.
-
-    Each array has shape (out_features, in_features + 1); the final column is the bias.
+    For each linear layer, count how many hyperplanes each example falls on the positive side.
+    Returns list of lists: counts_per_layer[layer_idx][sample_idx] = count
     """
-    rows = []
-    for module in model.modules():
-        if isinstance(module, nn.Linear):
-            w = module.weight.detach().cpu().numpy()
-            #b = module.bias.detach().cpu().numpy().reshape(-1, 1)
-            #mat = np.concatenate([w, b], axis=1)
-            # normalize each row to unit norm to focus on direction rather than scale
-            w_norm = np.linalg.norm(w, axis=1, keepdims=True)
-            w_norm = np.where(w_norm == 0, 1, w_norm)  # avoid division by zero
-            mat = w / w_norm
-            rows.append(mat)
-    return rows
-
-def plot_umap_weights_for_checkpoints(checkpoints_dict, mlp_template, device):
-    """Visualize weight-bias vectors for each layer/ checkpoint using UMAP.
-
-    Produces a grid where rows correspond to checkpoint names and columns to layers.
-    """
-    import umap
-
-    # determine number of linear layers from template
-    n_layers = sum(1 for m in mlp_template.modules() if isinstance(m, nn.Linear))
-    n_ckpts = len(checkpoints_dict)
-
-    fig, axes = plt.subplots(n_ckpts, n_layers, figsize=(n_layers * 4, n_ckpts * 4))
-    # ensure axes is 2D
-    if n_ckpts == 1:
-        axes = np.expand_dims(axes, 0)
-    if n_layers == 1:
-        axes = np.expand_dims(axes, 1)
-
-    for row, (name, ckpt_path) in enumerate(checkpoints_dict.items()):
-        if not ckpt_path.exists():
-            continue
-        checkpoint = torch.load(ckpt_path, map_location=device)
-        mlp = mlp_template
-        mlp.load_state_dict(checkpoint['model_state_dict'])
-        mlp.eval()
-
-        #layer_mats = extract_weight_bias_rows(mlp)
-        layer_mats = extract_norm_weight_rows(mlp)
-        for col, mat in enumerate(layer_mats):
-            reducer = umap.UMAP(n_components=2, random_state=42)
-            emb = reducer.fit_transform(mat)
-            ax = axes[row, col]
-            ax.scatter(emb[:, 0], emb[:, 1], s=2)
-            if row == 0:
-                ax.set_title(f"Layer {col + 1}")
-            if col == 0:
-                ax.set_ylabel(name)
-    plt.tight_layout()
-    # save the figure so it can be inspected later
-    try:
-        fig.savefig('umap_weight_bias.png', dpi=200)
-    except Exception as e:
-        print(f"Warning: could not save UMAP figure: {e}")
-    plt.show()
-
-
-def plot_tsne_weights_for_checkpoints(checkpoints_dict, mlp_template, device, **tsne_kwargs):
-    """Visualize weight‑bias vectors for each layer/checkpoint using t‑SNE.
-
-    Works like :func:`plot_umap_weights_for_checkpoints` but uses scikit‑learn's
-    TSNE. Any extra keyword arguments are forwarded to ``TSNE``.
-    The resulting plot is saved to ``tsne_weight_bias.png``.
-    """
-    from sklearn.manifold import TSNE
-
-    n_layers = sum(1 for m in mlp_template.modules() if isinstance(m, nn.Linear))
-    n_ckpts = len(checkpoints_dict)
-
-    fig, axes = plt.subplots(n_ckpts, n_layers, figsize=(n_layers * 4, n_ckpts * 4))
-    if n_ckpts == 1:
-        axes = np.expand_dims(axes, 0)
-    if n_layers == 1:
-        axes = np.expand_dims(axes, 1)
-
-    for row, (name, ckpt_path) in enumerate(checkpoints_dict.items()):
-        if not ckpt_path.exists():
-            continue
-        checkpoint = torch.load(ckpt_path, map_location=device)
-        mlp = mlp_template
-        mlp.load_state_dict(checkpoint['model_state_dict'])
-        mlp.eval()
-
-        #layer_mats = extract_weight_bias_rows(mlp)
-        layer_mats = extract_norm_weight_rows(mlp)
-
-        for col, mat in enumerate(layer_mats[:-1]):
-            reducer = TSNE(n_components=2, random_state=42, **tsne_kwargs)
-            emb = reducer.fit_transform(mat)
-            ax = axes[row, col]
-            ax.scatter(emb[:, 0], emb[:, 1], s=2)
-            if row == 0:
-                ax.set_title(f"Layer {col + 1}")
-            if col == 0:
-                ax.set_ylabel(name)
-    plt.tight_layout()
-    try:
-        fig.savefig('tsne_weight_bias.png', dpi=200)
-    except Exception as e:
-        print(f"Warning: could not save t-SNE figure: {e}")
-    plt.show()
-
-
-def plot_umap_layers_aggregated(checkpoints_dict, mlp_template, device):
-    """Aggregate normalized weights across checkpoints per layer and plot with UMAP.
-
-    For each linear layer we concatenate the row vectors from every checkpoint (after
-    normalizing each row to unit norm). A single UMAP embedding is computed per layer
-    and the points are colored according to which checkpoint they came from. The
-    resulting figure has one row and one column per layer.
-    """
-    # compute number of layers and ensure consistent ordering
-    layer_indices = [i for i, m in enumerate(mlp_template.modules()) if isinstance(m, nn.Linear)]
-    n_layers = len(layer_indices)
-    ckpt_names = list(checkpoints_dict.keys())
-    n_ckpts = len(ckpt_names)
-
-    # prepare colors
-    cmap = plt.get_cmap('tab10')
-    colors = {name: cmap(j % 10) for j, name in enumerate(ckpt_names)}
-
-    fig, axes = plt.subplots(1, n_layers, figsize=(n_layers * 4, 4))
-    if n_layers == 1:
-        axes = [axes]
-
-    for col, lin_idx in enumerate(layer_indices):
-        # collect all rows and checkpoint labels
-        all_rows = []
-        labels = []
-        for name in ckpt_names:
-            ckpt_path = checkpoints_dict[name]
-            if not ckpt_path.exists():
-                continue
-            checkpoint = torch.load(ckpt_path, map_location=device)
-            mlp = mlp_template
-            mlp.load_state_dict(checkpoint['model_state_dict'])
-            mlp.eval()
-            # extract layer weights
-            layer = [m for m in mlp.modules() if isinstance(m, nn.Linear)][col]
-            w = layer.weight.detach().cpu().numpy()
-            # normalize rows
-            norms = np.linalg.norm(w, axis=1, keepdims=True)
-            norms[norms == 0] = 1.0
-            w_norm = w / norms
-            all_rows.append(w_norm)
-            labels.extend([name] * w_norm.shape[0])
-        if len(all_rows) == 0:
-            continue
-        data = np.vstack(all_rows)
-        reducer = umap.UMAP(n_components=2, random_state=42)
-        emb = reducer.fit_transform(data)
-        ax = axes[col]
-        for name in ckpt_names:
-            # select points for this checkpoint
-            mask = [lbl == name for lbl in labels]
-            pts = emb[np.array(mask)]
-            ax.scatter(pts[:, 0], pts[:, 1], s=2, color=colors[name], label=name)
-        ax.set_title(f"Layer {col+1}")
-        if col == 0:
-            ax.legend(fontsize='small', markerscale=3)
-    plt.tight_layout()
-    try:
-        fig.savefig('umap_layers_aggregated.png', dpi=200)
-    except Exception as e:
-        print(f"Warning: could not save aggregated UMAP figure: {e}")
-    plt.show()
+    linear_indices = [1, 3, 5]  # indices of Linear layers in the sequential model
+    counts_per_layer = [[] for _ in range(len(linear_indices))]
+    
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    
+    with torch.no_grad():
+        for x, _ in loader:
+            x = x.to(device)
+            out = model[0](x)  # Flatten
+            
+            for i, lin_idx in enumerate(linear_indices):
+                preact = model[lin_idx](out)  # W @ out + b
+                
+                count = (preact >= 0).sum(dim=1).cpu().numpy()  # number of positive per sample
+                counts_per_layer[i].extend(count)
+                
+                # Apply activation for next layer
+                if lin_idx + 1 < len(model):
+                    out = model[lin_idx + 1](preact)
+    
+    # for each sample, set the count for a layer to be the min of all previous layers (bottleneck)
+    for i in range(1, len(counts_per_layer)):
+        counts_per_layer[i] = [min(counts_per_layer[i][j], counts_per_layer[i-1][j]) for j in range(len(counts_per_layer[i]))]
+    
+    # compute the expected counts for each layer
+    expected_counts = []
+    for i in range(len(counts_per_layer)):
+        expected_count = np.mean(counts_per_layer[i])
+        expected_counts.append(expected_count)
+    
+    return counts_per_layer, expected_counts
 
 # Checkpoint paths
 #checkpoint_dir = Path("../grok_data2/checkpoints")  # Adjust if necessary
-checkpoint_dir = Path("./checkpoints")  # Adjust if necessary
+checkpoint_dir = Path("../grok_data/checkpoints")  # Adjust if necessary
 checkpoints = {
-    'first': checkpoint_dir / f"mlp_checkpoint_step20000_depth3_width{width}_scale8.0.pt",
-    'middle': checkpoint_dir / f"mlp_checkpoint_step100000_depth3_width{width}_scale8.0.pt",
-    'last': checkpoint_dir / f"mlp_checkpoint_step175000_depth3_width{width}_scale8.0.pt"
+    'first': checkpoint_dir / "mlp_checkpoint_step20000_depth3_width200_scale8.0.pt",
+    'middle': checkpoint_dir / "mlp_checkpoint_step100000_depth3_width200_scale8.0.pt",
+    'last': checkpoint_dir / "mlp_checkpoint_step190000_depth3_width200_scale8.0.pt"
 }
 
 # Run analysis on test data for each checkpoint
@@ -386,8 +232,10 @@ for name, ckpt_path in checkpoints.items():
     acc_dict[name] = {'test': test_acc, 'train': train_acc}
     
     # Analyze
-    counts_per_layer = analyze_hyperplanes(mlp, test, device)
-    results[name] = counts_per_layer
+    counts_per_layer, expected_counts = ID_bottleneck_upperbound(mlp, test, device)
+    print(f"Expected counts for {name} checkpoint: {expected_counts}")
+    
+    results[name] = counts_per_layer #(counts_per_layer, expected_counts)
     print(f"Analyzed {name} checkpoint: step {checkpoint['step']}")
 
 # Generate adversarial examples using the first checkpoint
@@ -445,7 +293,10 @@ for name, ckpt_path in checkpoints.items():
     mlp = mlp_template
     mlp.load_state_dict(checkpoint['model_state_dict'])
     mlp.eval()
-    counts_adv = analyze_hyperplanes(mlp, adv_test, device)
+    #counts_adv = analyze_hyperplanes(mlp, adv_test, device)
+    counts_adv, expected_counts_adv = ID_bottleneck_upperbound(mlp, adv_test, device)
+    print(f"Expected counts for adversarial examples at {name} checkpoint: {expected_counts_adv}")
+
     results_adv[name] = counts_adv
     adv_acc = compute_accuracy(mlp, adv_test, device)
     acc_dict[name]['adv'] = adv_acc
@@ -502,29 +353,6 @@ for row, (data_name, counts_dict) in enumerate(datasets):
         ax.legend()
 
 plt.tight_layout()
-plt.savefig('hyperplane_side_histograms.png', dpi=200)
+plt.savefig('bottleneck_hyperplane_side_histograms.png', dpi=200)
 plt.show()
-exit(1) # skip the rest for now since it's more exploratory and less polished
 
-# visualize weight/bias vectors with UMAP for each checkpoint
-try:
-    print("Generating UMAP plots for weight/bias vectors...")
-    plot_umap_weights_for_checkpoints(checkpoints, mlp_template, device)
-except Exception as e:
-    print(f"Warning: failed to generate UMAP plots: {e}")
-
-if 0:
-    # visualize weight/bias vectors with t-SNE for each checkpoint
-    try:
-        print("Generating t-SNE plots for weight/bias vectors...")
-        plot_tsne_weights_for_checkpoints(checkpoints, mlp_template, device)
-    except Exception as e:
-        print(f"Warning: failed to generate t-SNE plots: {e}")
-
-# visualize aggregated layer weights across checkpoints with UMAP
-try:
-    print("Generating aggregated-layer UMAP plot...")
-    plot_umap_layers_aggregated(checkpoints, mlp_template, device)
-except Exception as e:
-    print(f"Warning: failed to generate aggregated-layer UMAP plot: {e}")
-#<parameter name="filePath">/home/engjon/work2/grok_project/src/hyperplane_side_analysis.py

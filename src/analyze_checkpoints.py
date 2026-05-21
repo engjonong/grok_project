@@ -146,20 +146,25 @@ def main():
 
         # Load intrinsic dimensions for this checkpoint
         intrinsic_dims_by_layer = load_intrinsic_dims(steps, depth, width, scale)
-
+        #print(intrinsic_dims_by_layer)
         # Iterate through layers to find Linear layers
         layer_idx = 0
+        actual_layer_idx = 0
         for module in mlp.modules():
+            #print(module)
             if isinstance(module, nn.Linear):
                 weight = module.weight.data  # shape: (out_features, in_features)
                 mean_dot, std_dot = compute_mean_pairwise_dot_product(weight)
                 mean_row_norm = compute_mean_weight_row_norms(weight)
+                # actual_layer_idx -1 because the first module is like a description. Sequential(...)
+                id_layer_name = f"layer_{actual_layer_idx-1}"
+                #print(id_layer_name)
+                intrinsic_dim = intrinsic_dims_by_layer.get(id_layer_name, None)
                 layer_name = f"layer_{layer_idx}"
-                intrinsic_dim = intrinsic_dims_by_layer.get(layer_name, None)
                 layer_data[layer_name].append((steps, mean_dot, std_dot, intrinsic_dim))
                 mean_row_norms_data[layer_name].append((steps, mean_row_norm))
                 layer_idx += 1
-
+            actual_layer_idx += 1
     # Sort the data by steps for each layer
     for layer_name in layer_data:
         layer_data[layer_name].sort(key=lambda x: x[0])
